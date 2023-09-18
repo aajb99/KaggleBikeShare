@@ -79,4 +79,54 @@ colnames(bike_predictions)[2] = "count"
 
 bike_predictions$datetime <- as.character(format(bike_predictions$datetime))
 
-vroom_write(bike_predictions, "bike_predictions.csv", delim = ",")
+#vroom_write(bike_predictions, "bike_predictions.csv", delim = ",")
+
+
+################################################################################
+# Poisson Regression
+
+install.packages("poissonreg") # install necessary packages
+library(poissonreg)
+
+# Improved Recipe
+data1 <- data1 %>%
+  select(-casual, - registered) # drop casual and registered variables
+
+bike_recipe <- recipe(count ~ ., data=data1) %>%
+  step_mutate(weather=ifelse(weather==4, 3, weather)) %>% #Change weather 4 to 3
+  step_mutate(weather=factor(weather, levels=1:3, labels=c("Sunny", "Mist", "Rain"))) %>% # change weather as factor INSIDE RECIPE
+  step_mutate(season=factor(season, levels=1:4, labels=c("Spring", "Summer", "Fall", "Winter"))) %>% # convert season to factor with levels
+  step_mutate(holiday=factor(holiday, levels=c(0,1), labels=c("No", "Yes"))) %>% # convert holiday to factor
+  step_time(datetime, features="hour") %>% # this hourly variable will replace datetime
+  step_rm(datetime)
+
+prepped_recipe <- prep(bike_recipe) # preprocessing new data
+baked_data1 <- bake(prepped_recipe, new_data = data1)
+
+pois_mod <- poisson_reg() %>% #Type of model3
+  set_engine("glm") # GLM = generalized linear model
+
+data_test <- vroom("test.csv") # input test data
+
+bike_pois_workflow <- workflow() %>%
+  add_recipe(bike_recipe) %>%
+  add_model(pois_mod) %>%
+  fit(data = data1) # Fit the workflow
+
+bike_predictions <- predict(bike_pois_workflow,
+                            new_data=data_test) # Use fit to predict
+
+# Set up for Kaggle:
+bike_predictions <- cbind(data_test$datetime, bike_predictions)
+
+colnames(bike_predictions)[1] = "datetime"
+colnames(bike_predictions)[2] = "count"
+
+bike_predictions$datetime <- as.character(format(bike_predictions$datetime))
+
+vroom_write(bike_predictions, "bike_predictions_pr.csv", delim = ",")
+
+
+
+
+
