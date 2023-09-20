@@ -127,6 +127,62 @@ bike_predictions$datetime <- as.character(format(bike_predictions$datetime))
 vroom_write(bike_predictions, "bike_predictions_pr.csv", delim = ",")
 
 
+################################################################################
+# Penalized Regression:
+
+install.packages("poissonreg") # install necessary packages
+library(poissonreg)
+install.packages("glmnet")
+library(glmnet)
+
+data1 <- vroom("train.csv") # grab training data
+
+# view(data1)
+
+data1 <- data1 %>%
+  select(-casual, - registered) # drop casual and registered variables
+
+log_train_set <- data1 %>%
+  mutate(count=log(count))
+
+bike_recipe <- recipe(count ~ ., data=log_train_set) %>%
+  step_mutate(weather=ifelse(weather==4, 3, weather)) %>% #Change weather 4 to 3
+  step_mutate(weather=factor(weather, levels=1:3, labels=c("Sunny", "Mist", "Rain"))) %>% # change weather as factor INSIDE RECIPE
+  step_mutate(season=factor(season, levels=1:4, labels=c("Spring", "Summer", "Fall", "Winter"))) %>% # convert season to factor with levels
+  step_mutate(holiday=factor(holiday, levels=c(0,1), labels=c("No", "Yes"))) %>% # convert holiday to factor
+  step_time(datetime, features="hour") %>% # this hourly variable will replace datetime
+  step_rm(datetime) %>%
+  step_dummy(all_nominal_predictors()) %>% #make dummy variables7
+  step_normalize(all_numeric_predictors()) # Make mean 0, sd=1
+
+prepped_recipe <- prep(bike_recipe) # preprocessing new data
+baked_data1 <- bake(prepped_recipe, new_data = log_train_set)
+
+preg_model <- linear_reg(penalty=0.001, mixture=0) %>% #Set model and tuning
+  set_engine("glmnet") # Function to fit in R
+
+data_test <- vroom("test.csv") # input test data
+
+bike_workflow <- workflow() %>%
+  add_recipe(bike_recipe) %>%
+  add_model(preg_model) %>%
+  fit(data = log_train_set) # Fit the workflow
+
+# Get Predictions and Set up for Kaggle:
+log_lin_preds <- predict(bike_workflow, new_data = data_test) %>% #This predicts log(count)
+  mutate(.pred=exp(.pred)) %>% # Back-transform the log to original scale
+  bind_cols(., data_test) %>% #Bind predictions with test data
+  select(datetime, .pred) %>% #Just keep datetime and predictions
+  rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
+  mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)
+  mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
+
+vroom_write(log_lin_preds, "bike_predictions_penreg.csv", delim = ",")
+
+
+
+
+
 
 
 
