@@ -272,7 +272,6 @@ vroom_write(final_log_lin_preds, "bike_predictions_penreg_cv.csv", delim = ",")
 ################################################################################
 # Regression Tree
 install.packages("rpart")
-library(tidymodels)
 library(tidyverse)
 library(tidymodels)
 install.packages("glmnet")
@@ -353,23 +352,88 @@ final_log_lin_preds <- predict(final_wf, new_data = data_test) %>% #This predict
 vroom_write(final_log_lin_preds, "bike_predictions_reg_tree.csv", delim = ",")
 
 
-
 ################################################################################
 # Random Forest Tuning
-# library(tidymodels)
-# 
-# 
-# require(xgboost)
-# 
-# data_train <- vroom("train.csv") # grab training data
-# 
-# data_test <- vroom("test.csv") # input test data
-# 
-# pred <- predict(bst, data_test)
-# 
-# boost_tree
+install.packages("rpart")
+install.packages('ranger')
+library(ranger)
+library(tidymodels)
+library(tidyverse)
+library(vroom)
+
+rf_mod <- rand_forest(mtry = tune(),
+                      min_n = tune(),
+                      trees = 500) %>%
+  set_engine('ranger') %>% # What R function to use
+  set_mode('regression')
+
+data_train <- vroom("train.csv") # grab training data
+# view(data_train)
+
+data_train <- data_train %>%
+  select(-casual, - registered) # drop casual and registered variables
+
+log_train_set <- data_train %>%
+  mutate(count=log(count))
+
+bike_recipe <- recipe(count ~ ., data=log_train_set) %>%
+  step_mutate(weather=ifelse(weather==4, 3, weather)) %>% #Change weather 4 to 3
+  step_mutate(weather=factor(weather, levels=1:3, labels=c("Sunny", "Mist", "Rain"))) %>% # change weather as factor INSIDE RECIPE
+  step_mutate(season=factor(season, levels=1:4, labels=c("Spring", "Summer", "Fall", "Winter"))) %>% # convert season to factor with levels
+  step_mutate(holiday=factor(holiday, levels=c(0,1), labels=c("No", "Yes"))) %>% # convert holiday to factor
+  step_time(datetime, features="hour") %>% # this hourly variable will replace datetime
+  step_rm(datetime)
+
+prepped_recipe <- prep(bike_recipe) # preprocessing new data
+baked_data1 <- bake(prepped_recipe, new_data = log_train_set)
+
+## Set Workflow
+rforest_wf <- workflow() %>%
+  add_recipe(bike_recipe) %>%
+  add_model(rf_mod)
+
+view(log_train_set)
+
+## Grid of values to tune over
+tuning_grid <- grid_regular(mtry(range = c(1, 9)),
+                            min_n(),
+                            levels = 3) ## L^2 total tuning possibilities
+
+## Split data for CV
+folds <- vfold_cv(data_train, v = 10, repeats=1) # k-fold CV
 
 
+## Run the CV1
+CV_results <- rforest_wf %>%
+  tune_grid(resamples=folds,
+            grid=tuning_grid,
+            metrics=metric_set(rmse, mae, rsq)) #Or leave metrics NULL
+
+## Find Best Tuning Parameters13
+bestTune <- CV_results %>%
+  select_best("rmse")
+
+
+## Finalize the Workflow & fit it1
+final_rforest_wf <- rforest_wf %>%
+  finalize_workflow(bestTune) %>%
+  fit(data=log_train_set)
+
+## Prediction
+# final_wf %>%
+#   predict(new_data = myNewData)
+
+data_test <- vroom("test.csv") # input test data
+
+final_log_lin_preds <- predict(final_rforest_wf, new_data = data_test) %>% #This predicts log(count)
+  mutate(.pred=exp(.pred)) %>% # Back-transform the log to original scale
+  bind_cols(., data_test) %>% #Bind predictions with test data
+  select(datetime, .pred) %>% #Just keep datetime and predictions
+  rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
+  mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)
+  mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
+
+vroom_write(final_log_lin_preds, "bike_predictions_rforest.csv", delim = ",")
 
 
 
