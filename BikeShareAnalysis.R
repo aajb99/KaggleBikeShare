@@ -363,7 +363,7 @@ library(vroom)
 
 rf_mod <- rand_forest(mtry = tune(),
                       min_n = tune(),
-                      trees = 500) %>%
+                      trees = 800) %>%
   set_engine('ranger') %>% # What R function to use
   set_mode('regression')
 
@@ -392,7 +392,7 @@ rforest_wf <- workflow() %>%
   add_recipe(bike_recipe) %>%
   add_model(rf_mod)
 
-view(log_train_set)
+#view(log_train_set)
 
 ## Grid of values to tune over
 tuning_grid <- grid_regular(mtry(range = c(1, 9)),
@@ -436,8 +436,146 @@ final_log_lin_preds <- predict(final_rforest_wf, new_data = data_test) %>% #This
 vroom_write(final_log_lin_preds, "bike_predictions_rforest.csv", delim = ",")
 
 
+################################################################################
+# Stacked Modeling
+install.packages("rpart")
+install.packages('ranger')
+library(ranger)
+library(tidymodels)
+library(tidyverse)
+library(vroom)
+install.packages('stacks')
+library(stacks)
+
+data_train <- vroom("train.csv") # grab training data
+# view(data_train)
+
+data_train <- data_train %>%
+  select(-casual, - registered) # drop casual and registered variables
+
+log_train_set <- data_train %>%
+  mutate(count=log(count))
+
+bike_recipe <- recipe(count ~ ., data=log_train_set) %>%
+  step_mutate(weather=ifelse(weather==4, 3, weather)) %>% #Change weather 4 to 3
+  step_mutate(weather=factor(weather, levels=1:3, labels=c("Sunny", "Mist", "Rain"))) %>% # change weather as factor INSIDE RECIPE
+  step_mutate(season=factor(season, levels=1:4, labels=c("Spring", "Summer", "Fall", "Winter"))) %>% # convert season to factor with levels
+  step_mutate(holiday=factor(holiday, levels=c(0,1), labels=c("No", "Yes"))) %>% # convert holiday to factor
+  step_time(datetime, features="hour") %>% # this hourly variable will replace datetime
+  step_rm(datetime) %>%
+  step_dummy(all_nominal_predictors()) %>% #make dummy variables7
+  step_normalize(all_numeric_predictors()) # Make mean 0, sd=1
+
+prepped_recipe <- prep(bike_recipe) # preprocessing new data
+baked_data1 <- bake(prepped_recipe, new_data = log_train_set)
+
+# Split data for CV
+folds <- vfold_cv(log_train_set, v = 10, repeats = 1)
+
+# Create control grid
+untunedModel <- control_stack_grid() # If tuning a model
+tunedModel <- control_stack_resamples() # If not tuning a model
+
+###############
+# Penalized Regression Model ###
+###############
+
+preg_model <- linear_reg(penalty=tune(),
+                         mixture=tune()) %>% #Set model and tuning
+  set_engine("glmnet") # Function to fit in R
+
+## Set Workflow
+preg_wf <- workflow() %>%
+  add_recipe(bike_recipe) %>%
+  add_model(preg_model)
+
+## Grid of values to tune over
+preg_tuning_grid <- grid_regular(penalty(),
+                            mixture(),
+                            levels = 5) ## L^2 total tuning possibilities
+
+preg_models <- preg_wf %>%
+  tune_grid(resamples = folds,
+            grid = preg_tuning_grid,
+            metrics = metric_set(rmse, mae, rsq),
+            control = untunedModel)
+  
+
+########
+# Linear Model
+########
+
+my_mod <- linear_reg() %>% # Type of Model
+  set_engine("lm") # R function to use
+
+lin_reg_wf <- workflow() %>%
+  add_recipe(bike_recipe) %>%
+  add_model(my_mod)
+
+lin_reg_model <- fit_resamples(
+  lin_reg_wf,
+  resamples = folds,
+  metrics = metric_set(rmse, mae, rsq),
+  control = tunedModel
+)
 
 
+########
+# Random Forest
+########
+
+# **flag as control = untuned model
+
+rf_mod <- rand_forest(mtry = tune(),
+                      min_n = tune(),
+                      trees = 750) %>%
+  set_engine('ranger') %>% # What R function to use
+  set_mode('regression')
+
+## Set Workflow
+rforest_wf <- workflow() %>%
+  add_recipe(bike_recipe) %>%
+  add_model(rf_mod)
+
+#view(log_train_set)
+
+## Grid of values to tune over
+tuning_grid <- grid_regular(mtry(range = c(1, 9)),
+                            min_n(),
+                            levels = 3) ## L^2 total tuning possibilities
+
+rf_preg_models <- rforest_wf %>%
+  tune_grid(resamples = folds,
+            grid = tuning_grid,
+            metrics = metric_set(rmse, mae, rsq),
+            control = untunedModel)
+
+
+#######
+# Stack the models together
+
+# Base models to include
+bike_stack <- stacks() %>%
+  add_candidates(preg_models) %>%
+  add_candidates(lin_reg_model) %>%
+  add_candidates(rf_preg_models)
+
+
+# Fit the stacked model
+fitted_bike_stack <- bike_stack %>%
+  blend_predictions() %>%
+  fit_members()
+
+data_test <- vroom("test.csv") # input test data
+
+final_stacked_preds <- predict(fitted_bike_stack, new_data = data_test) %>% #This predicts log(count)
+  mutate(.pred=exp(.pred)) %>% # Back-transform the log to original scale
+  bind_cols(., data_test) %>% #Bind predictions with test data
+  select(datetime, .pred) %>% #Just keep datetime and predictions
+  rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
+  mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
+
+vroom_write(final_stacked_preds, "bike_predictions_stack.csv", delim = ",")
 
 
 
