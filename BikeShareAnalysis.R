@@ -2,13 +2,26 @@ library(tidyverse)
 #install.packages('tidymodels')
 #install.packages('tidyverse')
 library(tidymodels)
-library(vroom)
-install.packages('DataExplorer')
+#install.packages('DataExplorer')
+#install.packages("poissonreg")
+library(poissonreg)
+# install.packages("glmnet")
+library(glmnet)
 library(patchwork)
+# install.packages("rpart")
+# install.packages('ranger')
+library(ranger)
+#install.packages('stacks')
+library(stacks)
+library(vroom)
+library(parsnip)
+# install.packages('dbarts')
+# library(dbarts)
+
+
 
 data1 <- vroom("train.csv") # grab training data
-
-view(data1)
+#view(data1)
 
 # Data Clean: 
 
@@ -85,9 +98,6 @@ bike_predictions$datetime <- as.character(format(bike_predictions$datetime))
 ################################################################################
 # Poisson Regression
 
-install.packages("poissonreg") # install necessary packages
-library(poissonreg)
-
 # Improved Recipe
 data1 <- data1 %>%
   select(-casual, - registered) # drop casual and registered variables
@@ -129,11 +139,6 @@ vroom_write(bike_predictions, "bike_predictions_pr.csv", delim = ",")
 
 ################################################################################
 # Penalized Regression:
-
-install.packages("poissonreg") # install necessary packages
-library(poissonreg)
-install.packages("glmnet")
-library(glmnet)
 
 data1 <- vroom("train.csv") # grab training data
 
@@ -182,12 +187,6 @@ vroom_write(log_lin_preds, "bike_predictions_penreg.csv", delim = ",")
 
 ################################################################################
 # Cross Validation
-
-library(tidyverse)
-library(tidymodels)
-install.packages("glmnet")
-library(glmnet)
-library(vroom)
 
 data_train <- vroom("train.csv") # grab training data
 # view(data1)
@@ -271,12 +270,6 @@ vroom_write(final_log_lin_preds, "bike_predictions_penreg_cv.csv", delim = ",")
 
 ################################################################################
 # Regression Tree
-install.packages("rpart")
-library(tidyverse)
-library(tidymodels)
-install.packages("glmnet")
-library(glmnet)
-library(vroom)
 
 my_mod <- decision_tree(tree_depth = tune(),
                         cost_complexity = tune(),
@@ -354,12 +347,6 @@ vroom_write(final_log_lin_preds, "bike_predictions_reg_tree.csv", delim = ",")
 
 ################################################################################
 # Random Forest Tuning
-install.packages("rpart")
-install.packages('ranger')
-library(ranger)
-library(tidymodels)
-library(tidyverse)
-library(vroom)
 
 rf_mod <- rand_forest(mtry = tune(),
                       min_n = tune(),
@@ -381,8 +368,11 @@ bike_recipe <- recipe(count ~ ., data=log_train_set) %>%
   step_mutate(weather=factor(weather, levels=1:3, labels=c("Sunny", "Mist", "Rain"))) %>% # change weather as factor INSIDE RECIPE
   step_mutate(season=factor(season, levels=1:4, labels=c("Spring", "Summer", "Fall", "Winter"))) %>% # convert season to factor with levels
   step_mutate(holiday=factor(holiday, levels=c(0,1), labels=c("No", "Yes"))) %>% # convert holiday to factor
-  step_time(datetime, features="hour") %>% # this hourly variable will replace datetime
-  step_rm(datetime)
+  step_date(datetime, features = "year") %>%
+  step_time(datetime, features="hour") %>% # this hourly variable will replace datetime %>%
+  step_rm(datetime) %>%
+  step_mutate(datetime_hour=factor(datetime_hour, levels = 0:23, labels = 0:23)) %>%
+  step_mutate(datetime_year=factor(datetime_year, levels = 2011:2012, labels = c(2011, 2012)))
 
 prepped_recipe <- prep(bike_recipe) # preprocessing new data
 baked_data1 <- bake(prepped_recipe, new_data = log_train_set)
@@ -433,19 +423,11 @@ final_log_lin_preds <- predict(final_rforest_wf, new_data = data_test) %>% #This
   mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)
   mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
 
-vroom_write(final_log_lin_preds, "bike_predictions_rforest.csv", delim = ",")
+vroom_write(final_log_lin_preds, "bike_predictions_rforest2.csv", delim = ",")
 
 
 ################################################################################
 # Stacked Modeling
-install.packages("rpart")
-install.packages('ranger')
-library(ranger)
-library(tidymodels)
-library(tidyverse)
-library(vroom)
-install.packages('stacks')
-library(stacks)
 
 data_train <- vroom("train.csv") # grab training data
 # view(data_train)
@@ -576,6 +558,40 @@ final_stacked_preds <- predict(fitted_bike_stack, new_data = data_test) %>% #Thi
   mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
 
 vroom_write(final_stacked_preds, "bike_predictions_stack.csv", delim = ",")
+
+
+################################################################################
+# Bayesian Additive Regression Trees (BART)
+
+bart_mod <- parsnip::bart(mode = 'regression',
+                 engine = 'dbarts',
+                 trees = 30)
+
+## Set Workflow
+bart_wf <- workflow() %>%
+  add_recipe(bike_recipe) %>%
+  add_model(bart_mod) %>%
+  fit(data=log_train_set)
+
+data_test <- vroom("test.csv") # input test data
+
+final_bart_preds <- predict(bart_wf, new_data = data_test) %>% #This predicts log(count)
+  mutate(.pred=exp(.pred)) %>% # Back-transform the log to original scale
+  bind_cols(., data_test) %>% #Bind predictions with test data
+  select(datetime, .pred) %>% #Just keep datetime and predictions
+  rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
+  mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)
+  mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
+
+vroom_write(final_bart_preds, "bike_predictions_bart.csv", delim = ",")
+
+
+
+
+
+
+
+
 
 
 
